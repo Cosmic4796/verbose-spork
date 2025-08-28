@@ -1,0 +1,6 @@
+[build]
+builder = "herokuish"
+
+[deploy]
+healthcheckPath = "/"
+restartPolicyType = "never"
