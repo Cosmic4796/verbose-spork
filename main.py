@@ -8,6 +8,7 @@ import os
 from datetime import datetime, timedelta
 import logging
 from collections import defaultdict, deque
+import platform
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -26,6 +27,7 @@ bot = discord.Client(intents=intents)
 HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-large"
 HUGGINGFACE_TOKEN = os.getenv('HUGGINGFACE_TOKEN')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # Optional webhook for server join notifications
 
 # Bot personality and behavior settings
 RANDOM_RESPONSE_CHANCE = 0.12  # 12% chance to randomly respond
@@ -94,6 +96,132 @@ PERSONALITY_RESPONSES = {
 }
 
 EMOJI_REACTIONS = ['🤖', '💭', '✨', '🎯', '💡', '🔥', '👀', '❤️', '😊', '🤔', '💯', '🚀']
+
+async def send_server_join_webhook(guild):
+    """Send server join notification to webhook"""
+    if not WEBHOOK_URL:
+        return
+    
+    try:
+        # Get server statistics
+        total_members = guild.member_count
+        bots = sum(1 for member in guild.members if member.bot)
+        humans = total_members - bots
+        
+        # Get server features
+        features = guild.features if guild.features else ["None"]
+        
+        # Get verification level
+        verification_levels = {
+            discord.VerificationLevel.none: "None",
+            discord.VerificationLevel.low: "Low",
+            discord.VerificationLevel.medium: "Medium", 
+            discord.VerificationLevel.high: "High",
+            discord.VerificationLevel.highest: "Highest"
+        }
+        
+        # Get server boost info
+        boost_level = guild.premium_tier
+        boost_count = guild.premium_subscription_count or 0
+        
+        # Create rich embed for webhook
+        embed_data = {
+            "title": "🎉 New Server Joined!",
+            "color": 0x00ff00,  # Green
+            "timestamp": datetime.utcnow().isoformat(),
+            "thumbnail": {
+                "url": str(guild.icon.url) if guild.icon else "https://cdn.discordapp.com/embed/avatars/0.png"
+            },
+            "fields": [
+                {
+                    "name": "🏠 Server Name",
+                    "value": guild.name,
+                    "inline": True
+                },
+                {
+                    "name": "🆔 Server ID", 
+                    "value": str(guild.id),
+                    "inline": True
+                },
+                {
+                    "name": "👥 Member Count",
+                    "value": f"**{total_members}** total\n👤 {humans} humans\n🤖 {bots} bots",
+                    "inline": True
+                },
+                {
+                    "name": "👑 Server Owner",
+                    "value": f"{guild.owner.mention if guild.owner else 'Unknown'}\n(`{guild.owner.name}#{guild.owner.discriminator}` - {guild.owner.id})",
+                    "inline": True
+                },
+                {
+                    "name": "📅 Server Created",
+                    "value": guild.created_at.strftime("%B %d, %Y\n%I:%M %p UTC"),
+                    "inline": True
+                },
+                {
+                    "name": "🔒 Verification Level",
+                    "value": verification_levels.get(guild.verification_level, "Unknown"),
+                    "inline": True
+                },
+                {
+                    "name": "📺 Channels",
+                    "value": f"💬 {len(guild.text_channels)} text\n🔊 {len(guild.voice_channels)} voice\n📁 {len(guild.categories)} categories",
+                    "inline": True
+                },
+                {
+                    "name": "😀 Emojis",
+                    "value": f"{len(guild.emojis)}/{guild.emoji_limit}",
+                    "inline": True
+                },
+                {
+                    "name": "🚀 Server Boost",
+                    "value": f"Level {boost_level}\n{boost_count} boosts",
+                    "inline": True
+                }
+            ],
+            "footer": {
+                "text": f"Bot now in {len(bot.guilds)} servers • {datetime.now().strftime('%m/%d/%Y %I:%M %p')}",
+                "icon_url": str(bot.user.avatar.url) if bot.user.avatar else None
+            }
+        }
+        
+        # Add server features if any
+        if features and features != ["None"]:
+            embed_data["fields"].append({
+                "name": "⭐ Server Features",
+                "value": ", ".join(features[:10]),  # Limit to 10 features
+                "inline": False
+            })
+        
+        # Get some channel info
+        general_channel = discord.utils.get(guild.text_channels, name='general')
+        if not general_channel:
+            general_channel = guild.text_channels[0] if guild.text_channels else None
+            
+        if general_channel:
+            embed_data["fields"].append({
+                "name": "📝 Primary Channel",
+                "value": f"#{general_channel.name} ({general_channel.id})",
+                "inline": True
+            })
+        
+        # Prepare webhook payload
+        webhook_data = {
+            "embeds": [embed_data],
+            "username": "AI Bot Logger",
+            "avatar_url": str(bot.user.avatar.url) if bot.user.avatar else None
+        }
+        
+        # Send webhook
+        async with aiohttp.ClientSession() as session:
+            async with session.post(WEBHOOK_URL, json=webhook_data) as response:
+                if response.status == 204:
+                    logger.info(f"✅ Successfully sent join webhook for {guild.name}")
+                else:
+                    logger.warning(f"⚠️ Webhook failed with status {response.status}")
+                    
+    except Exception as e:
+        logger.error(f"❌ Error sending server join webhook: {e}")
 
 async def generate_ai_response(prompt, context=None, personality_score=0.8, user_name="User"):
     """Enhanced AI response with personality and context awareness"""
@@ -354,7 +482,80 @@ async def on_reaction_add(reaction, user):
             pass
 
 @bot.event
-async def on_member_join(member):
+async def on_guild_join(guild):
+    """Called when bot joins a new server"""
+    logger.info(f"🎉 Joined new server: {guild.name} ({guild.id}) with {guild.member_count} members")
+    
+    # Send webhook notification
+    await send_server_join_webhook(guild)
+    
+    # Optional: Send a welcome message to the server
+    try:
+        # Find a suitable channel to send welcome message
+        welcome_channel = None
+        
+        # Try to find common channel names
+        for channel_name in ['general', 'welcome', 'bot-commands', 'chat']:
+            welcome_channel = discord.utils.get(guild.text_channels, name=channel_name)
+            if welcome_channel:
+                break
+        
+        # If no common channel found, use the first available text channel
+        if not welcome_channel and guild.text_channels:
+            welcome_channel = guild.text_channels[0]
+        
+        if welcome_channel:
+            welcome_messages = [
+                f"👋 Hey there, {guild.name}! I'm your new AI companion!\n\n🤖 Just **@mention me** anywhere to start chatting - no commands needed!\n💬 I'll also randomly join interesting conversations!\n✨ I can handle multiple people talking at once!\n\nLet's have some great conversations! 🚀",
+                f"🎉 Hello {guild.name}! I'm an AI bot that loves to chat!\n\n✨ **How to interact with me:**\n• @mention me anywhere for instant responses\n• I'll occasionally join conversations naturally\n• DM me for private chats\n• Say 'AI' or 'bot' to get my attention\n\nReady to make this server more engaging! 🤖💫",
+                f"🚀 Welcome! I've just joined {guild.name} and I'm excited to meet everyone!\n\n💡 **What makes me special:**\n• No commands needed - just talk naturally!\n• I remember our conversation context\n• I can chat with multiple people simultaneously\n• Random emoji reactions and personality\n\nLet's start chatting! Just @mention me! 🎯"
+            ]
+            
+            # Send welcome message with 5 second delay to avoid seeming too eager
+            await asyncio.sleep(5)
+            await welcome_channel.send(random.choice(welcome_messages))
+            logger.info(f"📨 Sent welcome message to #{welcome_channel.name} in {guild.name}")
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to send welcome message in {guild.name}: {e}")
+
+@bot.event
+async def on_guild_remove(guild):
+    """Called when bot leaves a server"""
+    logger.info(f"😢 Left server: {guild.name} ({guild.id})")
+    
+    # Optional: Send webhook for server leave as well
+    if WEBHOOK_URL:
+        try:
+            embed_data = {
+                "title": "😢 Left Server",
+                "description": f"Bot was removed from **{guild.name}**",
+                "color": 0xff0000,  # Red
+                "timestamp": datetime.utcnow().isoformat(),
+                "fields": [
+                    {
+                        "name": "Server Info",
+                        "value": f"**Name:** {guild.name}\n**ID:** {guild.id}\n**Members:** {guild.member_count}",
+                        "inline": True
+                    }
+                ],
+                "footer": {
+                    "text": f"Now in {len(bot.guilds)} servers",
+                    "icon_url": str(bot.user.avatar.url) if bot.user.avatar else None
+                }
+            }
+            
+            webhook_data = {
+                "embeds": [embed_data],
+                "username": "AI Bot Logger",
+                "avatar_url": str(bot.user.avatar.url) if bot.user.avatar else None
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                await session.post(WEBHOOK_URL, json=webhook_data)
+                
+        except Exception as e:
+            logger.error(f"Error sending leave webhook: {e}")
     """Welcome new members with a small chance"""
     if random.random() < 0.1:  # 10% chance to welcome
         try:
@@ -371,6 +572,11 @@ async def on_member_join(member):
             pass
 
 @bot.event
+async def on_member_join(member):
+    """Global error handler"""
+    logger.error(f"Discord error in {event}: {args}")
+
+@bot.event
 async def on_error(event, *args, **kwargs):
     """Global error handler"""
     logger.error(f"Discord error in {event}: {args}")
@@ -383,6 +589,11 @@ if __name__ == "__main__":
     
     if not HUGGINGFACE_TOKEN:
         print("⚠️ Warning: HUGGINGFACE_TOKEN not set. AI responses may be limited!")
+    
+    if not WEBHOOK_URL:
+        print("ℹ️ Info: WEBHOOK_URL not set. Server join notifications disabled.")
+    else:
+        print("📡 Webhook notifications enabled for server joins!")
     
     try:
         print("🚀 Starting AI Discord Bot...")
